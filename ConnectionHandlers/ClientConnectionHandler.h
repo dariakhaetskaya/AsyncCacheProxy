@@ -5,8 +5,6 @@
 #ifndef CACHEPROXY_CLIENTCONNECTIONHANDLER_H
 #define CACHEPROXY_CLIENTCONNECTIONHANDLER_H
 
-
-#include "ConnectionHandler.h"
 #include "../CacheProxy.h"
 #include "../HTTP_Parser_NodeJS/http_parser.h"
 #include "ServerConnectionHandler.h"
@@ -16,17 +14,17 @@
 
 #define BUF_SIZE 1024
 
-class ServerConnectionHandler;
+class CacheProxy;
 
 class ClientConnectionHandler : public ConnectionHandler {
 public:
     explicit ClientConnectionHandler(int socket, CacheProxy *proxy);
 
-    int connectToServer(std::string host);
+    static int connectToServer(std::string host);
 
     bool handle(int event) override;
 
-    ~ClientConnectionHandler() = default;
+    ~ClientConnectionHandler() override;
 
     std::string getURL();
 
@@ -46,7 +44,7 @@ public:
 
     void resetLastField();
 
-    void createServer(int socket, CacheRecord *record);
+    void createServer(int socket, CacheRecord *cacheRecord);
 
     bool writeToServer(const std::string& msg);
 
@@ -61,14 +59,14 @@ private:
     std::string url;
     std::string host;
     std::string headers;
-    Logger logger;
+    Logger *logger;
     ServerConnectionHandler *server;
     CacheRecord *record;
     size_t readPointer = 0;
     bool cachingInParallel = false;
     bool firstWriter = false;
 
-    bool recieve();
+    bool receive();
 
     bool becomeFirstWriter();
 

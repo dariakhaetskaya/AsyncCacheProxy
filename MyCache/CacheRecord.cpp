@@ -2,8 +2,7 @@
 // Created by rey on 11/13/21.
 //
 
-#include "CacheRecord.h"
-#include "../ConnectionHandlers/ClientConnectionHandler.h"
+#include "Cache.h"
 #include <stdexcept>
 
 void CacheRecord::setFullyCached() {
@@ -14,16 +13,14 @@ int CacheRecord::getObserverCount(){
     return observers.size();
 }
 
-CacheRecord::CacheRecord(const std::string& url, CacheProxy *clientProxy) {
-    this->cache = clientProxy->getCache();
-    this->cache->addRecord(url, this);
-    this->proxy = clientProxy;
+CacheRecord::CacheRecord(Cache* cache) {
+    this->cache = cache;
 }
 
 void CacheRecord::addObserver(int socket) {
     observers.push_back(socket);
     if (is_fully_cached) {
-        proxy->addEvent(socket, POLLOUT);
+        setReadyForRead();
     }
 }
 
@@ -41,13 +38,11 @@ void CacheRecord::write(const std::string &str) {
         data.append(str);
     }
     catch (std::bad_alloc &a) {
-        cache->logger.log("Proxy ran out of memory. Shutting down...", false);
-        proxy->stopProxy();
+        Logger::log("Proxy ran out of memory. Shutting down...", false);
+        cache->setRanOutOfMemory();
         return;
     }
-    for (auto observer : observers) {
-        proxy->addEvent(observer, POLLOUT);
-    }
+    setReadyForRead();
 }
 
 std::string CacheRecord::read(size_t start, size_t length) const {
@@ -57,21 +52,8 @@ std::string CacheRecord::read(size_t start, size_t length) const {
     return data.substr(start, length);
 }
 
-void CacheRecord::notifyCurrentObservers() {
-    // notify all observers that first writer (that was connected to server) died
-    for (auto observer : observers) {
-        proxy->addEvent(observer, POLLOUT);
-    }
-
-    for (auto observer : observers) {
-        auto* client = dynamic_cast<ClientConnectionHandler *>(proxy->getHandlerByFd(observer));
-        if (client != nullptr && client->tryMakeFirstWriter()){
-            return;
-        }
-    }
-}
-
 CacheRecord::~CacheRecord() {
     observers.clear();
-    data.clear();
+    std::string().swap(data);
 }
+

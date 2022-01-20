@@ -16,12 +16,14 @@
 #include <set>
 #include <map>
 #include <vector>
-#include "Logger/Logger.h"
 #include <netinet/in.h>
+#include <iostream>
+#include <bitset>
+#include <csignal>
+
+#include "ConnectionHandlers/ClientConnectionHandler.h"
 #include "ConnectionHandlers/ConnectionHandler.h"
 #include "MyCache/Cache.h"
-
-class Cache;
 
 class CacheProxy {
 
@@ -61,6 +63,10 @@ public:
 
     void deleteEvent(int fd, int event);
 
+    void makeNewServer(const std::vector<int> &observers);
+
+    void setPollOutEventToObservers(const std::vector<int> &observers);
 };
+
 
 #endif //CACHEPROXY_CACHEPROXY_H

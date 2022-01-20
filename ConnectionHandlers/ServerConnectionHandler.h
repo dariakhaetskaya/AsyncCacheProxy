@@ -11,15 +11,19 @@
 #include <locale>
 #include <netinet/tcp.h>
 #include <bitset>
-#include "../CacheProxy.h"
+#include <poll.h>
+#include <unistd.h>
+#include "../MyCache/Cache.h"
+#include "ConnectionHandler.h"
 
 #define BUF_SIZE 1024
 
-class CacheRecord;
-
-class CacheProxy;
-
 class ServerConnectionHandler : public ConnectionHandler {
+private:
+    int serverSocket;
+    Logger *logger;
+    CacheRecord *cacheRecord;
+
 public:
 
     ServerConnectionHandler(int socket, CacheRecord *record);
@@ -30,12 +34,7 @@ public:
 
     ~ServerConnectionHandler();
 
-    bool recieve();
-
-private:
-    int serverSocket;
-    Logger logger;
-    CacheRecord *cacheRecord;
+    bool receive();
 };
 
 

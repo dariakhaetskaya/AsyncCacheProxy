@@ -4,28 +4,26 @@
 
 #include "ServerConnectionHandler.h"
 
-
-ServerConnectionHandler::ServerConnectionHandler(int socket, CacheRecord *record) : logger(
-        *(new Logger())) {
+ServerConnectionHandler::ServerConnectionHandler(int socket, CacheRecord *record) : logger((new Logger())) {
     this->serverSocket = socket;
     this->cacheRecord = record;
 }
 
 bool ServerConnectionHandler::handle(int event) {
     if (event & POLLIN) {
-        if (!recieve()) {
+        if (!receive()) {
             return false;
         }
     }
     if (event == (POLLIN | POLLHUP)) {
-        if (!recieve()) {
+        if (!receive()) {
             return false;
         }
     }
     return true;
 }
 
-bool ServerConnectionHandler::recieve() {
+bool ServerConnectionHandler::receive() {
     char buffer[BUF_SIZE];
     ssize_t len = recv(serverSocket, buffer, BUF_SIZE, 0);
     if (len > 0) {
@@ -33,12 +31,13 @@ bool ServerConnectionHandler::recieve() {
     }
 
     if (len == -1) {
-        logger.log("Failed to read data from server", true);
+        logger->log("Failed to read data from server", true);
+        cacheRecord->setBroken();
         return false;
     }
 
     if (len == 0) {
-        logger.log("Server#" + std::to_string(serverSocket) + " done writing. Closing connection", true);
+        logger->log("Server#" + std::to_string(serverSocket) + " done writing. Closing connection", true);
         cacheRecord->setFullyCached();
         return false;
     }
@@ -47,6 +46,7 @@ bool ServerConnectionHandler::recieve() {
 }
 
 ServerConnectionHandler::~ServerConnectionHandler() {
+    delete logger;
     close(serverSocket);
 }
 

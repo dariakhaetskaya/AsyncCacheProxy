@@ -1,11 +1,13 @@
 //
 // Created by rey on 11/7/21.
 //
-
-#include <iostream>
-#include <bitset>
 #include "CacheProxy.h"
-#include "ConnectionHandlers/ClientConnectionHandler.h"
+
+bool interrupted = false;
+
+void interruptProxy(int signal){
+    interrupted = true;
+}
 
 int CacheProxy::createProxySocket(int port) {
 
@@ -19,19 +21,20 @@ void CacheProxy::stopProxy(){
     this->proxyOn = false;
 }
 
+
 bool CacheProxy::initProxySocket() {
     if (bind(socketDesc, (sockaddr *) &address, sizeof(address)) == -1) {
-        logger.log("CacheProxy :: Socket bind failed. Shutting down.", false);
+        Logger::log("CacheProxy :: Socket bind failed. Shutting down.", false);
         return false;
     }
 
     if (fcntl(socketDesc, F_SETFL, O_NONBLOCK) == -1) {
-        logger.log("CacheProxy :: Failed to set non-blocking flag to socketDesc. Shutting down.", false);
+        Logger::log("CacheProxy :: Failed to set non-blocking flag to socketDesc. Shutting down.", false);
         return false;
     }
 
     if (listen(socketDesc, 510) == -1) {
-        logger.log("CacheProxy :: listen(2) failed. Shutting down.", false);
+        Logger::log("CacheProxy :: listen(2) failed. Shutting down.", false);
         return false;
     }
 
@@ -47,26 +50,27 @@ void CacheProxy::addNewConnection(int socket, short event) {
 }
 
 CacheProxy::CacheProxy(int port) {
-    logger.log("CacheProxy :: Starting proxy on port " + std::to_string(port), false);
+    Logger::log("CacheProxy :: Starting proxy on port " + std::to_string(port), false);
 
     this->socketDesc = createProxySocket(port);
     if (socketDesc == -1) {
-        logger.log("CacheProxy :: Socket creation failed. Shutting down.", false);
+        Logger::log("CacheProxy :: Socket creation failed. Shutting down.", false);
         return;
     }
 
     if (!initProxySocket()) {
-        logger.log("CacheProxy :: Shutting down due to an internal error.", false);
+        Logger::log("CacheProxy :: Shutting down due to an internal error.", false);
         return;
     }
     addNewConnection(socketDesc, POLLIN | POLLHUP);
     this->proxyOn = true;
     this->cache = new Cache();
     if (cache == nullptr){
-        logger.log("Failed to create cache", false);
+        Logger::log("Failed to create cache", false);
         stopProxy();
     }
     memset(&address, 0, sizeof(address));
+    sigset(SIGINT, interruptProxy);
 }
 
 ConnectionHandler* CacheProxy::getHandlerByFd(int fd){
@@ -80,14 +84,17 @@ ConnectionHandler* CacheProxy::getHandlerByFd(int fd){
 }
 
 void CacheProxy::disconnectHandler(int socket) {
-    auto handler = handlers.at(socket);
-    handlers.erase(socket);
-    for (auto iter = connections.begin(); iter != connections.end(); ++iter)
+    Logger::log("Closing #" + std::to_string(socket), true);
+
+    for (auto iter = connections.begin(); iter != connections.end(); ++iter) {
         if ((*iter).fd == socket) {
             connections.erase(iter);
             break;
         }
-    logger.log("Closing #" + std::to_string(socket), true);
+    }
+
+    auto handler = handlers.at(socket);
+    handlers.erase(socket);
     close(socket);
     delete handler;
 }
@@ -117,9 +124,10 @@ void CacheProxy::run() {
     int selectedDescNum;
     int timeOut = 100000;
 
-    while (proxyOn) {
+    while (proxyOn && !interrupted && !cache->ranOutOfMemory()) {
+        setPollOutEventToObservers(cache->getReadyObservers());
         if ((selectedDescNum = poll(connections.data(), connections.size(), timeOut)) == -1) {
-            logger.log("CacheProxy :: run poll(2) internal error. Shutting down", false);
+            Logger::log("CacheProxy :: run poll(2) internal error. Shutting down", false);
             return;
 
         }
@@ -131,33 +139,28 @@ void CacheProxy::run() {
                 int newClientFD;
 
                 if ((newClientFD = accept(socketDesc, nullptr, nullptr)) == -1) {
-                    logger.log("CacheProxy :: Failed to accept new connection", false);
+                    Logger::log("CacheProxy :: Failed to accept new connection", false);
                     continue;
                 }
 
                 addNewConnection(newClientFD, POLLIN | POLLHUP);
                 ConnectionHandler *client = new ClientConnectionHandler(newClientFD, this);
                 if (client == nullptr){
-                    logger.log("Failed to create new client handler", false);
+                    Logger::log("Failed to create new client handler", false);
                     stopProxy();
                 }
                 addNewHandler(newClientFD, client);
-                logger.log("CacheProxy :: Accepted new connection from client #" + std::to_string(newClientFD), true);
+                Logger::log("CacheProxy :: Accepted new connection from client #" + std::to_string(newClientFD), true);
             }
 
             for (int i = 1; i < connections.size(); ++i) {
                 short eventCount = connections[i].revents;
-//                std::cout << "CacheProxy :: starting to handle #" + std::to_string(connections[i].fd) +
-//                             " with events = " << std::bitset<8>(connections[i].events) << std::endl;
 
                 if (eventCount > 0) {
 
-//                    std::cout << "CacheProxy :: starting to handle #" + std::to_string(connections[i].fd) +
-//                        " with revents = " << std::bitset<8>(connections[i].revents) << std::endl;
-
                     if (!(handlers.at(connections[i].fd)->handle(connections[i].revents))) {
                         disconnectHandler(connections[i].fd);
-                        logger.log("CacheProxy :: Closed connection with #" + std::to_string(connections[i].fd), true);
+                        Logger::log("CacheProxy :: Closed connection with #" + std::to_string(connections[i].fd), true);
                         connections[i].revents = 0;
                         continue;
                     }
@@ -175,9 +178,26 @@ void CacheProxy::addNewHandler(int fd, ConnectionHandler *handler) {
 }
 
 CacheProxy::~CacheProxy() {
-    for (auto handler : handlers){
+    for (auto handler : handlers) {
         disconnectHandler(handler.first);
     }
     close(socketDesc);
     delete cache;
+}
+
+void CacheProxy::makeNewServer(const std::vector<int>& observers) {
+    for (auto observer : observers) {
+        addEvent(observer, POLLOUT);
+        auto* client = dynamic_cast<ClientConnectionHandler *>(getHandlerByFd(observer));
+        if (client != nullptr && client->tryMakeFirstWriter()){
+            return;
+        }
+    }
+}
+
+void CacheProxy::setPollOutEventToObservers(const std::vector<int>& observers){
+    for (auto observer : observers){
+        addEvent(observer, POLLOUT);
+    }
+    cache->clearReadyObservers();
 }

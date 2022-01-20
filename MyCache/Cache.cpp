@@ -13,17 +13,19 @@ bool Cache::isFullyCached(const std::string &url) {
 }
 
 
-void Cache::addRecord(const std::string &url, CacheRecord *record) {
-    logger.log("Adding new record for " + url, false);
+CacheRecord* Cache::addRecord(const std::string &url) {
+    Logger::log("Adding new record for " + url, false);
+    auto record = new CacheRecord(this);
     cache.insert(std::make_pair(url, record));
+    return record;
 }
 
 CacheRecord *Cache::subscribe(const std::string &url, int socket) {
     if (isCached(url)) {
-        logger.log("Subscribing client #" + std::to_string(socket) + " to " + url, true);
+        Logger::log("Subscribing client #" + std::to_string(socket) + " to " + url, true);
         cache.find(url)->second->addObserver(socket);
     } else {
-        logger.log(url + " is not cached.", true);
+        Logger::log(url + " is not cached.", true);
         return nullptr;
     }
     return cache.find(url)->second;
@@ -41,5 +43,20 @@ Cache::~Cache() {
     for (const auto& record : cache){
         delete record.second;
     }
-    logger.log("Cache deleted", true);
+    Logger::log("Cache deleted", true);
 }
+
+std::vector<int> Cache::getReadyObservers() {
+    for (auto record : cache){
+        if (record.second->isReadyForRead()){
+            readyObservers.insert(readyObservers.end(), record.second->getObservers().begin(), record.second->getObservers().end());
+        }
+    }
+    return readyObservers;
+}
+
+void Cache::clearReadyObservers(){
+    readyObservers.clear();
+}
+
+

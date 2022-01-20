@@ -25,7 +25,9 @@ public:
 
     Logger() = default;
 
-    void log(const std::string &msg, bool isDebugMsg);
+    ~Logger() = default;
+
+    static void log(const std::string &msg, bool isDebugMsg);
 };
 
 

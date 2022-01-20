@@ -6,13 +6,13 @@
 
 Logger generalLogger;
 
-static int getURLfromHTTP(http_parser *parser, const char *at, size_t len) {
+static int getUrlFromHTTP(http_parser *parser, const char *at, size_t len) {
     auto *handler = (ClientConnectionHandler *) parser->data;
-    generalLogger.log("Client sent " + std::string(http_method_str(static_cast<http_method>(parser->method)))
+    Logger::log("Client sent " + std::string(http_method_str(static_cast<http_method>(parser->method)))
                       + " method", true);
 
-    if (parser->method != 1 && parser->method != 2) {
-        generalLogger.log("Client sent " + std::string(http_method_str(static_cast<http_method>(parser->method)))
+    if (parser->method != 1u && parser->method != 2u) {
+        Logger::log("Client sent " + std::string(http_method_str(static_cast<http_method>(parser->method)))
                           + " method. Proxy does not currently support it.", false);
         int sock = handler->getSocket();
         char NOT_ALLOWED[59] = "HTTP/1.0 405 METHOD NOT ALLOWED\r\n\r\n Method Not Allowed";
@@ -21,7 +21,7 @@ static int getURLfromHTTP(http_parser *parser, const char *at, size_t len) {
     }
 
     handler->setURL(at, len);
-    generalLogger.log("Parsed URL : " + handler->getURL(), true);
+    Logger::log("Parsed URL : " + handler->getURL(), true);
     return 0;
 }
 
@@ -50,7 +50,7 @@ int handleHeaderValue(http_parser *parser, const char *at, size_t len) {
 static int handleHeadersComplete(http_parser *parser) {
     auto *handler = (ClientConnectionHandler *) parser->data;
     handler->setNewHeader("\r\n");
-    generalLogger.log("Parsed headers:\n" + handler->getHeaders(), true);
+    Logger::log("Parsed headers:\n" + handler->getHeaders(), true);
     return 0;
 }
 
@@ -60,14 +60,12 @@ bool ClientConnectionHandler::sendRequest() {
     return true;
 }
 
-
-ClientConnectionHandler::ClientConnectionHandler(int sock, CacheProxy *clientProxy) : logger(*(new Logger())) {
-    this->clientSocket = sock;
-    http_parser_init(&parser, HTTP_REQUEST);
+ClientConnectionHandler::ClientConnectionHandler(int sock, CacheProxy *clientProxy) : logger((new Logger())) {
+    http_parser_settings_init(&settings);
+    http_parser_init(&parser, HTTP_REQUEST);this->clientSocket = sock;
     this->parser.data = this;
     this->proxy = clientProxy;
-    http_parser_settings_init(&settings);
-    this->settings.on_url = getURLfromHTTP;
+    this->settings.on_url = getUrlFromHTTP;
     this->settings.on_header_field = handleHeaderField;
     this->settings.on_header_value = handleHeaderValue;
     this->settings.on_headers_complete = handleHeadersComplete;
@@ -80,25 +78,23 @@ ClientConnectionHandler::ClientConnectionHandler(int sock, CacheProxy *clientPro
 
 bool ClientConnectionHandler::handle(int event) {
 
-//    std::cout << "Revents = " << std::bitset<8>(event) << std::endl;
-
     if (event & POLLOUT) {
-        if (!initialized) {
+        if (!initialized || record->isBroken()) {
             return false;
         }
 
         if (!firstWriter && readPointer >= record->getLastWrittenChar() && !cachingInParallel) {
-            logger.log("Caught up with the first writer. Now caching in parallel", true);
+            Logger::log("Caught up with the first writer. Now caching in parallel", true);
             cachingInParallel = true;
             return true;
         }
         if (readPointer <= record->getLastWrittenChar()) {
             std::string buffer = record->read(readPointer, BUF_SIZE);
-//            logger.log("Client #" + std::to_string(clientSocket) + " read " + std::to_string(buffer.size()) + " bytes", true);
-            readPointer += buffer.size();
             ssize_t ret = send(clientSocket, buffer.data(), buffer.size(), 0);
             if (ret == -1) {
                 perror("send failed");
+            } else {
+                readPointer += buffer.size();
             }
             if ((!record->isFullyCached() && cachingInParallel) || buffer.empty()) {
                 proxy->deleteEvent(clientSocket, POLLOUT);
@@ -112,7 +108,7 @@ bool ClientConnectionHandler::handle(int event) {
     }
 
     if (event & POLLIN) {
-        if (!recieve()) {
+        if (!receive()) {
             return false;
         }
     }
@@ -121,54 +117,65 @@ bool ClientConnectionHandler::handle(int event) {
 
 }
 
-bool ClientConnectionHandler::recieve() {
+bool ClientConnectionHandler::receive() {
     char buffer[BUFSIZ];
 
-    ssize_t len = recv(clientSocket, buffer, BUFSIZ, 0);
+    std::string request;
+    ssize_t len = 1;
 
-//    logger.log("buffer = [ " + std::string(buffer) + " ]", true);
+    while (len > 0) {
+        len = recv(clientSocket, buffer, BUFSIZ, 0);
 
-
-    if (len < 0) {
-        logger.log("Failed to read data from clientSocket", true);
-        return false;
-    }
-
-    if (len == 0) {
-        logger.log("Client #" + std::to_string(clientSocket) + " done writing. Closing connection", true);
-        proxy->deleteEvent(clientSocket, POLLOUT);
-        if (firstWriter && record->getObserverCount() > 1) {
-            record->notifyCurrentObservers();
+        if (len < 0) {
+            Logger::log("Failed to read data from clientSocket", true);
+            return false;
         }
-        proxy->getCache()->unsubscribe(url, clientSocket);
-        return false;
+
+        if (len == 0) {
+            Logger::log("Client #" + std::to_string(clientSocket) + " done writing. Closing connection", true);
+            proxy->deleteEvent(clientSocket, POLLOUT);
+            if (firstWriter && record->getObserverCount() > 1) {
+                proxy->makeNewServer(record->getObservers());
+            }
+            proxy->getCache()->unsubscribe(url, clientSocket);
+            return false;
+        }
+
+        request.append(buffer, len);
+        memset(buffer, 0, BUFSIZ);
+        if (len == BUFSIZ) {
+            memset(buffer, 0, BUFSIZ);
+        } else {
+            len = 0;
+        }
     }
+    Logger::log("buffer = [ " + request + " ]", true);
 
     if (!initialized) {
-        int ret = http_parser_execute(&parser, &settings, buffer, len);
+        int ret = http_parser_execute(&parser, &settings, request.data(), request.size());
 
-        if (ret != len || parser.http_errno != 0) {
-            logger.log("Failed to parse http. Errno " + std::to_string(parser.http_errno), false);
+        if (ret != request.size() || parser.http_errno != 0u) {
+            Logger::log("Failed to parse http. Errno " + std::to_string(parser.http_errno), false);
             return false;
         }
 
         if (!proxy->getCache()->isCached(url)) {
-            record = new CacheRecord(url, proxy);
+            record = proxy->getCache()->addRecord(url);
             // if failed to allocate new record
-            if (record == nullptr){
-                logger.log("Failed to allocate new cache record for " + url, false);
+            if (record == nullptr) {
+                Logger::log("Failed to allocate new cache record for " + url, false);
                 proxy->stopProxy();
             }
-            logger.log(url + " new record created", false);
+            Logger::log(url + " new record created", false);
             initialized = true;
             return becomeFirstWriter();
         } else if (proxy->getCache()->isFullyCached(url)) {
             record = proxy->getCache()->subscribe(url, clientSocket);
-            logger.log(url + " is cached. Subscribed to cache record", false);
+            Logger::log(url + " is cached. Subscribed to cache record", false);
             proxy->addEvent(clientSocket, POLLOUT);
         } else {
             record = proxy->getCache()->subscribe(url, clientSocket);
-            logger.log(url + " is currently caching. Subscribed to cache record", false);
+            Logger::log(url + " is currently caching. Subscribed to cache record", false);
             proxy->addEvent(clientSocket, POLLOUT);
         }
 
@@ -186,19 +193,19 @@ bool ClientConnectionHandler::becomeFirstWriter() {
     readPointer = 0;
     int serverSocket = connectToServer(host);
     if (serverSocket == -1) {
-        logger.log("Cannot connect to: " + host + " closing connection.", false);
+        Logger::log("Cannot connect to: " + host + " closing connection.", false);
         return false;
     } else {
         createServer(serverSocket, record);
         proxy->getCache()->subscribe(url, clientSocket);
     }
-    logger.log("Connected to server " + host, true);
+    Logger::log("Connected to server " + host, true);
 
     if (!sendRequest()) {
         return false;
     }
 
-    logger.log("Client #" + std::to_string(clientSocket) + " is now first writer", true);
+    Logger::log("Client #" + std::to_string(clientSocket) + " is now first writer", true);
     return true;
 }
 
@@ -221,13 +228,13 @@ void ClientConnectionHandler::setLastField(const char *at, size_t len) {
 int ClientConnectionHandler::connectToServer(std::string host) {
     int serverSocket;
     if ((serverSocket = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0) {
-        logger.log("Failed to open new socket", false);
+        Logger::log("Failed to open new socket", false);
         return -1;
     }
 
     struct hostent *hostinfo = gethostbyname(host.data());
     if (hostinfo == NULL) {
-        logger.log("Unknown host" + host, false);
+        Logger::log("Unknown host" + host, false);
         close(serverSocket);
         return -1;
     }
@@ -238,7 +245,7 @@ int ClientConnectionHandler::connectToServer(std::string host) {
     sockaddrIn.sin_addr = *((struct in_addr *) hostinfo->h_addr);
 
     if ((connect(serverSocket, (struct sockaddr *) &sockaddrIn, sizeof(sockaddrIn))) == -1) {
-        logger.log("Cannot connect to" + host, false);
+        Logger::log("Cannot connect to" + host, false);
         close(serverSocket);
         return -1;
     }
@@ -258,10 +265,10 @@ void ClientConnectionHandler::resetLastField() {
     lastField = "";
 }
 
-void ClientConnectionHandler::createServer(int socket, CacheRecord *record) {
-    server = new ServerConnectionHandler(socket, record);
-    if (server == nullptr){
-        logger.log("Failed to create new server", false);
+void ClientConnectionHandler::createServer(int socket, CacheRecord *cacheRecord) {
+    server = new ServerConnectionHandler(socket, cacheRecord);
+    if (server == nullptr) {
+        Logger::log("Failed to create new server", false);
         proxy->stopProxy();
     }
     proxy->addNewConnection(socket, (POLLIN | POLLHUP));
@@ -272,7 +279,7 @@ bool ClientConnectionHandler::writeToServer(const std::string &msg) {
     ssize_t len = send(server->getSocket(), msg.data(), msg.size(), 0);
 
     if (len == -1) {
-        logger.log("Failed to send data to server", false);
+        Logger::log("Failed to send data to server", false);
         return false;
     }
 
@@ -281,6 +288,10 @@ bool ClientConnectionHandler::writeToServer(const std::string &msg) {
 
 void ClientConnectionHandler::setHost(const char *at, size_t len) {
     host.append(at, len);
+}
+
+ClientConnectionHandler::~ClientConnectionHandler() {
+    delete logger;
 }
 
 

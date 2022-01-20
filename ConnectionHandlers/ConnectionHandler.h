@@ -5,6 +5,8 @@
 #ifndef CACHEPROXY_CONNECTIONHANDLER_H
 #define CACHEPROXY_CONNECTIONHANDLER_H
 
+#include "../Logger/Logger.h"
+
 class ConnectionHandler {
 public:
     virtual ~ConnectionHandler() = default;
